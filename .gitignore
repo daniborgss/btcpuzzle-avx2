@@ -1,0 +1,12 @@
+# Compiled binaries / build artifacts
+/bitcoin_finder
+*.exe
+*.test
+*.out
+
+# Profiling output
+*.prof
+*.pprof
+
+# Search results — these contain PRIVATE KEYS, never commit them
+found_key_*.txt

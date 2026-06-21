@@ -1,4 +1,4 @@
-module btcgoai
+module github.com/daniborgss/btcpuzzle-avx2
 
 go 1.21
 
