@@ -12,7 +12,7 @@ The RIPEMD160 stage has **swappable backends selected by build tag** (see
 # math (~1.2x). This is the build for the Tiger Lake dev machine.
 GOAMD64=v3 CGO_ENABLED=1 go build -tags avx2 -o btcpuzzle-avx2 .
 
-# SSE4 (older x86-64, no AVX2; cgo). 4-way backend — added in a later step.
+# SSE4 (older x86-64, no AVX2; cgo). 4-way backend.
 GOAMD64=v2 CGO_ENABLED=1 go build -tags sse4 -o btcpuzzle-sse4 .
 
 # Pure-Go fallback (no tag, no cgo) — builds/runs anywhere; slow, for correctness.
@@ -62,9 +62,12 @@ The tool searches private keys within a puzzle's defined range to find the key m
 7. `ripemd160simd/` — multi-message RIPEMD160 for fixed 32-byte inputs, with
    **build-tag-selected backends** all exposing the same API (`const Lanes` +
    `HashBatch(out *[Lanes][20]byte, in *[Lanes][32]byte)`): `avx2.go`+`ripemd160_avx2.c`
-   (`-tags avx2`, 8-way AVX2 cgo), and `purego.go` (no tag, pure-Go fallback, no
-   cgo). An `sse4` backend is planned. `doc.go` documents the contract; the C files
-   are guarded by `#ifdef BACKEND_*` (cgo compiles every `.c` regardless of Go tags).
+   (`-tags avx2`, 8-way AVX2 cgo, `Lanes=8`), `sse4.go`+`ripemd160_sse4.c`
+   (`-tags sse4`, 4-way SSE2/SSE4 cgo, `Lanes=4`), and `purego.go` (no tag, pure-Go
+   fallback, no cgo, `Lanes=8`). `doc.go` documents the contract; the C files are
+   guarded by `#ifdef BACKEND_*` (cgo compiles every `.c` regardless of Go tags).
+   Tags are mutually exclusive (`sse4` is `sse4 && !avx2`), so a stray double tag
+   still resolves to one backend.
    `ripemd160simd_test.go` is backend-agnostic — it checks whatever backend the tags
    select byte-for-byte against `golang.org/x/crypto/ripemd160`.
 

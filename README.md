@@ -22,7 +22,7 @@ so the hardware requirement depends on which backend you build:
 | Backend (tag) | Requires | Notes |
 |---|---|---|
 | **`avx2`** | x86-64 with **AVX2** + the `GOAMD64=v3` set (BMI2/FMA/F16C); **SHA-NI** used if present | The primary, fastest build. Any Intel Haswell (2013+) or AMD Zen (2017+) qualifies. |
-| **`sse4`** | x86-64 with **SSE2/SSE4** (essentially any x86-64) | For pre-AVX2 CPUs (e.g. Ivy/Sandy Bridge); *planned*. Build with `GOAMD64=v2`. |
+| **`sse4`** | x86-64 with **SSE2/SSE4** (essentially any x86-64) | For pre-AVX2 CPUs (e.g. Ivy/Sandy Bridge). 4-way. Build with `GOAMD64=v2`. |
 | **none (pure-Go)** | nothing special; no C compiler | Universal fallback, slow. |
 
 **Developed & benchmarked on:** Intel Core i7-1185G7 — 11th Gen "Tiger Lake",
@@ -79,7 +79,7 @@ matching tag:
 | Target CPU | Build command | Backend |
 |---|---|---|
 | **x86-64 with AVX2** (this dev machine: Tiger Lake) | `GOAMD64=v3 CGO_ENABLED=1 go build -tags avx2 -o btcpuzzle-avx2 .` | 8-way AVX2 (cgo) |
-| **older x86-64, no AVX2** (e.g. Ivy/Sandy Bridge) | `GOAMD64=v2 CGO_ENABLED=1 go build -tags sse4 -o btcpuzzle-sse4 .` | 4-way SSE (cgo) — *planned* |
+| **older x86-64, no AVX2** (e.g. Ivy/Sandy Bridge) | `GOAMD64=v2 CGO_ENABLED=1 go build -tags sse4 -o btcpuzzle-sse4 .` | 4-way SSE (cgo) |
 | **any platform / no C compiler** | `CGO_ENABLED=0 go build -o btcpuzzle-purego .` | pure-Go fallback |
 
 The `avx2`/`sse4` builds need cgo (`gcc`/`clang`, `CGO_ENABLED=1`); the no-tag build
