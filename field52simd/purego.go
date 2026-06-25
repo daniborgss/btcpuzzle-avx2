@@ -1,9 +1,16 @@
 package field52simd
 
 import (
+	"encoding/binary"
 	"math/big"
 	"math/bits"
 )
+
+// pLimbs is p in radix 2^52 (canonical), used by the conditional subtraction in
+// reduceCanonical. Matches libsecp256k1's field_5x52 prime constants.
+var pLimbs = [5]uint64{
+	0xFFFFEFFFFFC2F, 0xFFFFFFFFFFFFF, 0xFFFFFFFFFFFFF, 0xFFFFFFFFFFFFF, 0x0FFFFFFFFFFFF,
+}
 
 const mask52 = (1 << 52) - 1
 
@@ -72,11 +79,70 @@ func (z *Fe) SetBytes(b *[32]byte) {
 	z.fromBig(new(big.Int).SetBytes(b[:]))
 }
 
+// reduceCanonical reduces the limbs in place to the unique canonical form
+// (value < p; limbs 0..3 < 2^52, limb 4 < 2^48), in pure limb arithmetic with
+// no big.Int. Accepts any input whose limbs/value the pipeline produces
+// (limbs up to a raw Add's < 2^53, value up to a sub chain's < ~2^259).
+func (z *Fe) reduceCanonical() {
+	// Carry-normalize (handles limbs > 2^52 from a raw Add).
+	var carry uint64
+	for k := 0; k < 5; k++ {
+		v := z.n[k] + carry
+		z.n[k] = v & mask52
+		carry = v >> 52
+	}
+	// Fold any value >= 2^260 (16c), then iterate the 2^256 fold (c) until the
+	// top limb is < 2^48. Both are tiny for our inputs (at most a couple steps).
+	for carry != 0 {
+		v := z.n[0] + carry*cAdj
+		z.n[0] = v & mask52
+		c2 := v >> 52
+		for k := 1; k < 5; k++ {
+			v = z.n[k] + c2
+			z.n[k] = v & mask52
+			c2 = v >> 52
+		}
+		carry = c2
+	}
+	for z.n[4] >= (1 << 48) {
+		mtop := z.n[4] >> 48
+		z.n[4] &= (1 << 48) - 1
+		v := z.n[0] + mtop*c52
+		z.n[0] = v & mask52
+		c2 := v >> 52
+		for k := 1; k < 5; k++ {
+			v = z.n[k] + c2
+			z.n[k] = v & mask52
+			c2 = v >> 52
+		}
+	}
+	// Conditional subtract p: compute z - p with borrow; if it didn't borrow
+	// (z >= p), keep the difference. value < 2^256 < 2p, so one step suffices.
+	var t [5]uint64
+	var borrow uint64
+	for k := 0; k < 5; k++ {
+		d := (z.n[k] | (1 << 52)) - pLimbs[k] - borrow
+		t[k] = d & mask52
+		borrow = 1 - ((d >> 52) & 1)
+	}
+	if borrow == 0 {
+		z.n = t
+	}
+}
+
 // Bytes returns the canonical (< p) value as 32 big-endian bytes.
 func (z *Fe) Bytes() [32]byte {
-	v := new(big.Int).Mod(z.toBig(), P)
+	t := *z
+	t.reduceCanonical()
+	w0 := t.n[0] | (t.n[1] << 52)
+	w1 := (t.n[1] >> 12) | (t.n[2] << 40)
+	w2 := (t.n[2] >> 24) | (t.n[3] << 28)
+	w3 := (t.n[3] >> 36) | (t.n[4] << 16)
 	var out [32]byte
-	v.FillBytes(out[:])
+	binary.BigEndian.PutUint64(out[0:], w3)
+	binary.BigEndian.PutUint64(out[8:], w2)
+	binary.BigEndian.PutUint64(out[16:], w1)
+	binary.BigEndian.PutUint64(out[24:], w0)
 	return out
 }
 
