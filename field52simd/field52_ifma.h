@@ -17,6 +17,10 @@ void field52_sqr8(uint64_t *out, const uint64_t *a);
 // field52_inverse8: out[l] = a[l]^(-1) mod p (Fermat chain, one cgo call).
 void field52_inverse8(uint64_t *out, const uint64_t *a);
 
+// field52_canon_bytes8: canonicalize ng groups and pack each lane to 32
+// big-endian bytes (out is ng*8*32 bytes).
+void field52_canon_bytes8(uint8_t *out, const uint64_t *in, long ng);
+
 // Fused per-pass steps over ng groups (one cgo call for the whole laneSet).
 void field52_slope_setup8(uint64_t *denom, uint64_t *num, const uint64_t *x,
                           const uint64_t *y, const uint64_t *xG,

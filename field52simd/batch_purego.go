@@ -111,6 +111,19 @@ func MontBackward(inv []Fe8, invAcc *Fe8, prefix, denom []Fe8) {
 	*invAcc = acc
 }
 
+// CanonBytes canonicalizes every lane of every group in src and writes its
+// 32-byte big-endian value into dst (len(src)*Lanes*32 bytes).
+func CanonBytes(dst []byte, src []Fe8) {
+	for g := range src {
+		var fe [Lanes]Fe
+		UnpackLanes(&fe, &src[g])
+		for l := 0; l < Lanes; l++ {
+			b := fe[l].Bytes()
+			copy(dst[(g*Lanes+l)*32:], b[:])
+		}
+	}
+}
+
 // PointAdd: second-pass affine add per group — lambda = num*inv,
 // x3 = lambda^2 - x - xsub, y3 = lambda*(x - x3) - y.
 func PointAdd(x, y, num, inv, xsub []Fe8) {

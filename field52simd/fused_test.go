@@ -73,6 +73,67 @@ func TestMontInversionFused(t *testing.T) {
 	}
 }
 
+func TestCanonBytes(t *testing.T) {
+	// Build values that actually exercise the conditional subtract of p: raw
+	// representatives in [p, 2^256) (which Bytes must reduce to value-p), plus
+	// random ones. Compared against an independent big.Int oracle, so a wrong p
+	// constant in the C/Go canonicalization is caught.
+	// The window [p, 2^256) is only 2^32+977 wide, so offsets must stay small.
+	max := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 256), big.NewInt(1)) // 2^256-1
+	geP := []*big.Int{
+		new(big.Int).Set(P),                          // == p   -> 0
+		new(big.Int).Add(P, big.NewInt(1)),           // p+1    -> 1
+		new(big.Int).Add(P, big.NewInt(0x80000000)),  // p + 2^31 (< 2^256)
+		new(big.Int).Sub(max, big.NewInt(7)),         // near 2^256
+		max,
+	}
+
+	var vals []*big.Int
+	vals = append(vals, geP...)
+	for i := 0; i < 8*4; i++ { // fill some full groups with randoms too
+		r, _ := randBytesBig(t)
+		vals = append(vals, r)
+	}
+
+	ng := (len(vals) + Lanes - 1) / Lanes
+	src := make([]Fe8, ng)
+	for g := 0; g < ng; g++ {
+		var fe [Lanes]Fe
+		for l := 0; l < Lanes; l++ {
+			idx := g*Lanes + l
+			var b [32]byte
+			if idx < len(vals) {
+				vals[idx].FillBytes(b[:]) // RAW value (may be >= p), not reduced
+			}
+			fe[l].SetBytes(&b)
+		}
+		PackLanes(&src[g], &fe)
+	}
+
+	dst := make([]byte, ng*Lanes*32)
+	CanonBytes(dst, src)
+	for g := 0; g < ng; g++ {
+		for l := 0; l < Lanes; l++ {
+			idx := g*Lanes + l
+			if idx >= len(vals) {
+				continue
+			}
+			want := bytesOf(vals[idx]) // big.Int mod p — independent oracle
+			var got [32]byte
+			copy(got[:], dst[(g*Lanes+l)*32:])
+			if got != want {
+				t.Fatalf("CanonBytes idx %d (val %x): got %x want %x", idx, vals[idx], got, want)
+			}
+		}
+	}
+}
+
+func randBytesBig(t *testing.T) (*big.Int, [32]byte) {
+	t.Helper()
+	b := randBytes(t)
+	return new(big.Int).SetBytes(b[:]), b
+}
+
 func TestPointAddFused(t *testing.T) {
 	const ng = 3
 	x, y := randGroups(t, ng), randGroups(t, ng)

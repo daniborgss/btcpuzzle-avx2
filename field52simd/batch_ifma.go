@@ -37,6 +37,16 @@ func InverseFe8(out, a *Fe8) {
 	)
 }
 
+// CanonBytes canonicalizes every lane of every group in src and writes its
+// 32-byte big-endian value into dst (len(src)*Lanes*32 bytes), in one cgo call.
+func CanonBytes(dst []byte, src []Fe8) {
+	C.field52_canon_bytes8(
+		(*C.uint8_t)(unsafe.Pointer(&dst[0])),
+		(*C.uint64_t)(unsafe.Pointer(&src[0])),
+		C.long(len(src)),
+	)
+}
+
 // The fused EC affine-add steps below process a whole laneSet (one cgo call for
 // all groups) — see the matching doc in batch_purego.go. []Fe8 is contiguous,
 // so &s[0] is the base of len(s)*40 uint64.

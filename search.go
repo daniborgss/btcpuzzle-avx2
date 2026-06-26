@@ -56,13 +56,13 @@ func newHash160er() *hash160er {
 
 // sha256Pubkey writes SHA256(0x02/0x03 || x) into dst. xb is the canonical
 // 32-byte big-endian X coordinate; oddY selects the compressed-key prefix.
-func (h *hash160er) sha256Pubkey(oddY bool, xb *[32]byte, dst *[32]byte) {
+func (h *hash160er) sha256Pubkey(oddY bool, xb []byte, dst *[32]byte) {
 	if oddY {
 		h.pubkey[0] = 0x03
 	} else {
 		h.pubkey[0] = 0x02
 	}
-	copy(h.pubkey[1:], xb[:])
+	copy(h.pubkey[1:], xb)
 
 	h.sha.Reset()
 	h.sha.Write(h.pubkey[:])
@@ -100,9 +100,10 @@ type laneSet struct {
 	prefix []field52simd.Fe8 // running prefix products for Montgomery's trick
 	xsub   []field52simd.Fe8 // second x to subtract in x3 = lambda^2 - x - xsub
 
-	// Flat per-lane coordinates, refreshed from x/y at the top of forEachHash.
-	xsFlat []field52simd.Fe
-	ysFlat []field52simd.Fe
+	// Canonical 32-byte big-endian X and Y for every lane, filled by CanonBytes
+	// at the top of forEachHash (lane j at [j*32 : j*32+32]).
+	xb []byte
+	yb []byte
 }
 
 // newLaneSet seeds one affine point per base key with a full scalar
@@ -124,8 +125,8 @@ func newLaneSet(baseKeys []*big.Int) *laneSet {
 		inv:    make([]field52simd.Fe8, ng),
 		prefix: make([]field52simd.Fe8, ng),
 		xsub:   make([]field52simd.Fe8, ng),
-		xsFlat: make([]field52simd.Fe, ng*w),
-		ysFlat: make([]field52simd.Fe, ng*w),
+		xb:     make([]byte, ng*w*32),
+		yb:     make([]byte, ng*w*32),
 	}
 	var k btcec.ModNScalar
 	var p btcec.JacobianPoint
@@ -163,30 +164,22 @@ func newLaneSet(baseKeys []*big.Int) *laneSet {
 func (ls *laneSet) forEachHash(h *hash160er, fn func(lane int, h160 []byte) bool) bool {
 	const w = ripemd160simd.Lanes
 
-	// Refresh the flat per-lane coordinates from the SoA groups (cheap; no
-	// modular reduction here).
-	for g := 0; g < ls.ng; g++ {
-		var xs, ys [field52simd.Lanes]field52simd.Fe
-		field52simd.UnpackLanes(&xs, &ls.x[g])
-		field52simd.UnpackLanes(&ys, &ls.y[g])
-		copy(ls.xsFlat[g*field52simd.Lanes:], xs[:])
-		copy(ls.ysFlat[g*field52simd.Lanes:], ys[:])
-	}
+	// Canonicalize all lanes' X/Y to 32-byte big-endian in two fused calls.
+	field52simd.CanonBytes(ls.xb, ls.x)
+	field52simd.CanonBytes(ls.yb, ls.y)
 
 	n := ls.n
 	var idx [w]int
 	j := 0
 	for j < n {
-		// Gather up to w live lanes and stage their SHA256 outputs. The x and y
-		// coordinates are canonicalized here (Bytes) so the hash matches the
-		// reference; this is the slow per-lane reduction passo 2b will speed up.
+		// Gather up to w live lanes and stage their SHA256 outputs.
 		cnt := 0
 		for j < n && cnt < w {
 			if !ls.dead[j] {
 				idx[cnt] = j
-				xb := ls.xsFlat[j].Bytes()
-				yb := ls.ysFlat[j].Bytes()
-				h.sha256Pubkey(yb[31]&1 == 1, &xb, &h.shaIn[cnt])
+				xb := ls.xb[j*32 : j*32+32]
+				oddY := ls.yb[j*32+31]&1 == 1
+				h.sha256Pubkey(oddY, xb, &h.shaIn[cnt])
 				cnt++
 			}
 			j++

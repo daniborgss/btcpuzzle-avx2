@@ -19,6 +19,7 @@
 
 #define VLO(acc, a, b) _mm512_madd52lo_epu64((acc), (a), (b)) // acc += low52(a*b)
 #define VHI(acc, a, b) _mm512_madd52hi_epu64((acc), (a), (b)) // acc += hi52 (a*b)
+#define FE8 40 // uint64 per Fe8 group (5 limbs * 8 lanes)
 
 // reduce folds the 10 product columns t[0..9] (each lane < 2^52 after the carry
 // pass) down to 5 limbs r[0..4] congruent mod p. Mirrors reduceSolinas:
@@ -179,6 +180,86 @@ static void sub_lanes(__m512i r[5], const __m512i av[5], const __m512i bv[5]) {
     }
 }
 
+// canon_lanes reduces r in place to the unique canonical form (value < p), the
+// vector analog of purego.go's reduceCanonical. Inputs are PointAdd/sub outputs
+// (limbs < 2^52, value < 2^256 + tiny), so two top folds then one conditional
+// subtract of p suffice.
+static void canon_lanes(__m512i r[5]) {
+    const __m512i mask52 = _mm512_set1_epi64((1ULL << 52) - 1);
+    const __m512i mask48 = _mm512_set1_epi64((1ULL << 48) - 1);
+    const __m512i c52 = _mm512_set1_epi64(4294968273ULL);
+    const __m512i bit52 = _mm512_set1_epi64(1ULL << 52);
+    const __m512i one = _mm512_set1_epi64(1);
+    const __m512i pv[5] = {
+        _mm512_set1_epi64(0xFFFFEFFFFFC2FULL), _mm512_set1_epi64(0xFFFFFFFFFFFFFULL),
+        _mm512_set1_epi64(0xFFFFFFFFFFFFFULL), _mm512_set1_epi64(0xFFFFFFFFFFFFFULL),
+        _mm512_set1_epi64(0x0FFFFFFFFFFFFULL),
+    };
+    __m512i carry = _mm512_setzero_si512();
+    for (int k = 0; k < 5; k++) {
+        __m512i v = _mm512_add_epi64(r[k], carry);
+        r[k] = _mm512_and_si512(v, mask52);
+        carry = _mm512_srli_epi64(v, 52);
+    }
+    for (int it = 0; it < 2; it++) {
+        __m512i mtop = _mm512_srli_epi64(r[4], 48);
+        r[4] = _mm512_and_si512(r[4], mask48);
+        __m512i v = VLO(r[0], mtop, c52);
+        r[0] = _mm512_and_si512(v, mask52);
+        __m512i cc = _mm512_srli_epi64(v, 52);
+        for (int k = 1; k < 5; k++) {
+            v = _mm512_add_epi64(r[k], cc);
+            r[k] = _mm512_and_si512(v, mask52);
+            cc = _mm512_srli_epi64(v, 52);
+        }
+    }
+    // Conditional subtract p: t = r - p; where it didn't borrow (r >= p), use t.
+    __m512i borrow = _mm512_setzero_si512(), t[5];
+    for (int k = 0; k < 5; k++) {
+        __m512i d = _mm512_sub_epi64(
+            _mm512_sub_epi64(_mm512_or_si512(r[k], bit52), pv[k]), borrow);
+        t[k] = _mm512_and_si512(d, mask52);
+        borrow = _mm512_sub_epi64(one, _mm512_and_si512(_mm512_srli_epi64(d, 52), one));
+    }
+    __mmask8 ge = _mm512_cmpeq_epi64_mask(borrow, _mm512_setzero_si512());
+    for (int k = 0; k < 5; k++) {
+        r[k] = _mm512_mask_blend_epi64(ge, r[k], t[k]);
+    }
+}
+
+static inline void put_be64(uint8_t *p, uint64_t v) {
+    for (int i = 0; i < 8; i++) {
+        p[i] = (uint8_t)(v >> (56 - 8 * i));
+    }
+}
+
+// field52_canon_bytes8: canonicalize ng groups and pack each lane's value to 32
+// big-endian bytes (out is ng*8*32 bytes; lane g*8+l at offset (g*8+l)*32).
+void field52_canon_bytes8(uint8_t *out, const uint64_t *in, long ng) {
+    for (long g = 0; g < ng; g++) {
+        __m512i r[5];
+        load5(r, in + FE8 * g);
+        canon_lanes(r);
+        uint64_t lanes[5][8];
+        for (int k = 0; k < 5; k++) {
+            _mm512_storeu_si512((void *)lanes[k], r[k]);
+        }
+        for (int l = 0; l < 8; l++) {
+            uint64_t l0 = lanes[0][l], l1 = lanes[1][l], l2 = lanes[2][l];
+            uint64_t l3 = lanes[3][l], l4 = lanes[4][l];
+            uint64_t w0 = l0 | (l1 << 52);
+            uint64_t w1 = (l1 >> 12) | (l2 << 40);
+            uint64_t w2 = (l2 >> 24) | (l3 << 28);
+            uint64_t w3 = (l3 >> 36) | (l4 << 16);
+            uint8_t *o = out + (g * 8 + l) * 32;
+            put_be64(o + 0, w3);
+            put_be64(o + 8, w2);
+            put_be64(o + 16, w1);
+            put_be64(o + 24, w0);
+        }
+    }
+}
+
 void field52_mul8(uint64_t *out, const uint64_t *a, const uint64_t *b) {
     __m512i av[5], bv[5], r[5];
     load5(av, a);
@@ -238,8 +319,6 @@ void field52_inverse8(uint64_t *out, const uint64_t *a) {
 // which is what actually matters at this point: cgo call overhead, not the SIMD
 // itself, dominated the loop. A group occupies 40 contiguous uint64 (5 limbs *
 // 8 lanes), so group g lives at offset 40*g. Mirrors advance() in search.go.
-
-#define FE8 40 // uint64 per Fe8 group
 
 // slope_setup: denom = x - xG, num = y - yG, for every group.
 void field52_slope_setup8(uint64_t *denom, uint64_t *num, const uint64_t *x,
