@@ -67,7 +67,7 @@ The tool searches private keys within a puzzle's defined range to find the key m
 
 ### Flow
 
-1. `main.go` — entry point: loads data, prompts for wallet number (1–160), resolves the target Hash160 and key range, then calls `searchForPrivateKey`.
+1. `main.go` — entry point: loads data, picks the wallet number (1–160) from the `-wallet` flag or an interactive prompt, resolves the target Hash160 and key range, then calls `searchForPrivateKey` (passing `-workers`, the parallel worker count; 0 = one per logical CPU). Run multiple instances on distinct wallets by splitting cores with `-workers` (sum ≤ logical CPUs) and optionally `taskset`; stacking instances gives no extra throughput.
 2. `search.go` — parallel search engine. See **Search algorithm** below. Progress is logged every 10 seconds. On match, writes the private key to `found_key_<hash160prefix>.txt`.
 3. `bitcoin.go` — cryptographic primitives: `privateKeyToHash160` (the reference/seed path) and `privateKeyToAddress` (unused in the main path). Uses `btcsuite/btcd` for secp256k1 and `btcutil.Hash160`.
 4. `data.go` — data loading: reads `data/hash160s.json` as the primary source; falls back to `data/wallets.json` (address strings) but conversion is not implemented.

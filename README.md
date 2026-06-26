@@ -71,16 +71,40 @@ The program reads its data files relative to the working directory, so run it fr
 the project root (where the `data/` directory lives):
 
 ```
-./btcpuzzle-ifma -wallet 65    # non-interactive: search wallet 65
-./btcpuzzle-ifma               # interactive: prompts for the wallet number
+./btcpuzzle-ifma -wallet 65            # non-interactive: search wallet 65
+./btcpuzzle-ifma                       # interactive: prompts for the wallet number
+./btcpuzzle-ifma -wallet 65 -workers 4 # limit to 4 parallel workers
 ```
 
 `-wallet N` selects the puzzle (1–160) without prompting (handy for scripts and
-benchmarking); omit it to be prompted. The search uses one worker per CPU core and
-runs until a match is found (Ctrl-C to stop). On a match the private key is printed
-and written to `found_key_<hash160prefix>.txt` — **this file contains a private
-key** and is git-ignored. Low-numbered wallets solve instantly; high-numbered ones
-have astronomically large ranges and run indefinitely.
+benchmarking); omit it to be prompted. `-workers N` sets how many parallel search
+workers to spawn; the default (0) is one per logical CPU. The search runs until a
+match is found (Ctrl-C to stop). On a match the private key is printed and written
+to `found_key_<hash160prefix>.txt` — **this file contains a private key** and is
+git-ignored. Low-numbered wallets solve instantly; high-numbered ones have
+astronomically large ranges and run indefinitely.
+
+### Running several instances
+
+One instance already uses every logical CPU, so a single search needs no flags.
+To search **different wallets in parallel**, split the machine with `-workers` so
+the instances don't oversubscribe the cores (the sum of all `-workers` should not
+exceed the logical CPU count — e.g. 8 on a 4-core/8-thread laptop):
+
+```
+# Two wallets, sharing all 8 threads (≈ half throughput each):
+./btcpuzzle-ifma -wallet 71 -workers 4 &
+./btcpuzzle-ifma -wallet 73 -workers 4 &
+
+# Stronger isolation: pin each to its own 2 physical cores (no HT cross-talk,
+# avoids cross-instance AVX-512 downclock):
+taskset -c 0,1 ./btcpuzzle-ifma -wallet 71 -workers 2 &
+taskset -c 2,3 ./btcpuzzle-ifma -wallet 73 -workers 2 &
+```
+
+`-workers` caps how many cores each instance grabs; `taskset` pins *which* cores.
+Stacking instances on the same wallet/machine gives no extra throughput — they
+contend for the same cores — so only run multiple instances for distinct wallets.
 
 ## Compilation
 

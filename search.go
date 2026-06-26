@@ -346,10 +346,12 @@ func anyLaneZero(f *field52simd.Fe8) bool {
 // hashes to targetHash160, within [minKey, maxKey], using one goroutine per CPU
 // core. Each worker walks a contiguous slice of the range from a shared random
 // offset, advancing a batch of lanes with incremental point addition.
-func searchForPrivateKey(minKey, maxKey *big.Int, targetHash160 []byte) {
-	numWorkers := runtime.NumCPU()
+func searchForPrivateKey(minKey, maxKey *big.Int, targetHash160 []byte, workers int) {
+	// workers <= 0 means "one per logical CPU"; otherwise use the requested count
+	// (e.g. to split a machine across several instances; see the -workers flag).
+	numWorkers := workers
 	if numWorkers < 1 {
-		numWorkers = 1
+		numWorkers = runtime.NumCPU()
 	}
 
 	// Inclusive count of keys in the range.

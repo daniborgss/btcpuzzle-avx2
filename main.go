@@ -13,6 +13,7 @@ import (
 
 func main() {
 	walletFlag := flag.Int("wallet", 0, "wallet number to search (1-160); 0 prompts interactively")
+	workersFlag := flag.Int("workers", 0, "number of parallel search workers; 0 = one per logical CPU")
 	flag.Parse()
 
 	// Load wallet hash160s
@@ -75,7 +76,7 @@ func main() {
 	minKey.SetString(selectedRange.Min[2:], 16) // Remove 0x prefix
 	maxKey.SetString(selectedRange.Max[2:], 16) // Remove 0x prefix
 
-	searchForPrivateKey(minKey, maxKey, targetHash160)
+	searchForPrivateKey(minKey, maxKey, targetHash160, *workersFlag)
 }
 
 
