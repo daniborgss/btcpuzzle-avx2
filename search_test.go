@@ -53,6 +53,53 @@ func TestLaneSetMatchesReference(t *testing.T) {
 	}
 }
 
+// TestLaneSetMultiGroup exercises the integrated pipeline across more than one
+// 8-lane group with a non-multiple-of-8 lane count (so the final group carries
+// dead padding lanes) and over many advance steps. This covers the cross-group
+// batched inversion, the padding-lane handling, and the seed key=1 doubling,
+// all validated against the full-scalar-mult reference.
+func TestLaneSetMultiGroup(t *testing.T) {
+	// 20 lanes -> 3 groups (last group: 4 live + 4 padding/dead).
+	bases := []*big.Int{
+		big.NewInt(1), big.NewInt(2), big.NewInt(3), big.NewInt(0x1000),
+		big.NewInt(0xdeadbeef), big.NewInt(0xcafe), big.NewInt(0x7fffffff),
+	}
+	for i := len(bases); i < 20; i++ {
+		bases = append(bases, new(big.Int).SetInt64(int64(0x100000007*(i+1)+12345)))
+	}
+
+	ls := newLaneSet(bases)
+	if ls.ng != 3 || ls.n != 20 {
+		t.Fatalf("unexpected layout: n=%d ng=%d (want 20, 3)", ls.n, ls.ng)
+	}
+	h := newHash160er()
+	g := generatorPoint()
+
+	const ticks = 17
+	for tick := 0; tick < ticks; tick++ {
+		seen := make([]bool, len(bases))
+		ls.forEachHash(h, func(lane int, got []byte) bool {
+			seen[lane] = true
+			key := new(big.Int).Add(bases[lane], big.NewInt(int64(tick)))
+			want, err := privateKeyToHash160(padPrivateKey(key.Bytes(), 32))
+			if err != nil {
+				t.Fatalf("reference hash160 failed for key %x: %v", key.Bytes(), err)
+			}
+			if !bytes.Equal(got, want) {
+				t.Errorf("tick %d lane %d key %x:\n  got  %x\n  want %x",
+					tick, lane, key.Bytes(), got, want)
+			}
+			return false
+		})
+		for lane, ok := range seen {
+			if !ok {
+				t.Errorf("tick %d: live lane %d was never hashed", tick, lane)
+			}
+		}
+		ls.advance(&g)
+	}
+}
+
 // TestGeneratorHash160 anchors the reference itself: the compressed public key
 // of private key 1 is the secp256k1 generator, whose hash160 is a well-known
 // constant.

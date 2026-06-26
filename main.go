@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"encoding/hex"
+	"flag"
 	"fmt"
 	"math/big"
 	"os"
@@ -11,6 +12,9 @@ import (
 )
 
 func main() {
+	walletFlag := flag.Int("wallet", 0, "wallet number to search (1-160); 0 prompts interactively")
+	flag.Parse()
+
 	// Load wallet hash160s
 	walletHash160s, err := loadWalletHash160s()
 	if err != nil {
@@ -27,14 +31,22 @@ func main() {
 	}
 	fmt.Printf("%sLoaded %d ranges%s\n", ColorGreen, len(ranges), ColorReset)
 
-	// Prompt user for wallet number
-	reader := bufio.NewReader(os.Stdin)
-	fmt.Printf("%sEnter wallet number (1-160):%s ", ColorCyan, ColorReset)
-	walletNumStr, _ := reader.ReadString('\n')
-	walletNumStr = strings.TrimSpace(walletNumStr)
-	walletNum, err := strconv.Atoi(walletNumStr)
-	if err != nil || walletNum < 1 || walletNum > 160 {
-		fmt.Printf("%sInvalid wallet number. Please enter a number between 1 and 160.%s\n", ColorRed, ColorReset)
+	// Determine the wallet number: from the -wallet flag, or prompt if unset.
+	walletNum := *walletFlag
+	if walletNum == 0 {
+		reader := bufio.NewReader(os.Stdin)
+		fmt.Printf("%sEnter wallet number (1-160):%s ", ColorCyan, ColorReset)
+		walletNumStr, _ := reader.ReadString('\n')
+		walletNumStr = strings.TrimSpace(walletNumStr)
+		n, err := strconv.Atoi(walletNumStr)
+		if err != nil {
+			fmt.Printf("%sInvalid wallet number. Please enter a number between 1 and 160.%s\n", ColorRed, ColorReset)
+			return
+		}
+		walletNum = n
+	}
+	if walletNum < 1 || walletNum > 160 {
+		fmt.Printf("%sInvalid wallet number %d. Must be between 1 and 160.%s\n", ColorRed, walletNum, ColorReset)
 		return
 	}
 
