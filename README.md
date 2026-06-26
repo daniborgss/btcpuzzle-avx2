@@ -1,4 +1,4 @@
-# Bitcoin Puzzle Finder — AVX2 / Intel Tiger Lake build
+# Bitcoin Puzzle Finder — AVX2 + AVX-512 IFMA / Intel Tiger Lake build
 
 A CLI tool for the **Bitcoin Puzzle challenges** (the well-known 1000 BTC / 32 BTC
 puzzle transactions, where the keys for puzzles 1–160 are deliberately constrained
@@ -6,41 +6,48 @@ to known ranges and solving them is the intended goal). It searches the private
 keys within a puzzle's defined range to find the one whose compressed public key
 hashes to the target wallet's Hash160.
 
-This build is **tuned for x86-64 with AVX2** and was developed and benchmarked on
-an **Intel Core i7-1185G7 (11th Gen, Tiger Lake)**. See
-[Target CPU / hardware](#target-cpu--hardware) for exact requirements. CPU-specific
-variants for other processors live in sibling repositories.
+This build is **tuned for x86-64 with AVX2 + AVX-512 IFMA** and was developed and
+benchmarked on an **Intel Core i7-1185G7 (11th Gen, Tiger Lake)**. Two SIMD stages
+are selected at build time: the RIPEMD160 hash (AVX2) and the secp256k1 field
+multiply (AVX-512 IFMA, `vpmadd52`). The accelerated binary combines both and runs
+the EC point arithmetic 8 lanes at a time — about **3× the throughput** of the
+earlier scalar build. See [Target CPU / hardware](#target-cpu--hardware) for exact
+requirements. CPU-specific variants for other processors live in sibling
+repositories.
 
 > This code exists solely for the puzzle challenge. It must never be adapted or
 > used against regular wallets that don't belong to the puzzle.
 
 ## Target CPU / hardware
 
-The RIPEMD160 backend is chosen at build time (see [Compilation](#compilation)),
-so the hardware requirement depends on which backend you build:
+The two SIMD stages are chosen at build time (see [Compilation](#compilation)) via
+build tags, so the hardware requirement depends on which you build:
 
-| Backend (tag) | Requires | Notes |
+| Build (tags) | Requires | Notes |
 |---|---|---|
-| **`avx2`** | x86-64 with **AVX2** + the `GOAMD64=v3` set (BMI2/FMA/F16C); **SHA-NI** used if present | The primary, fastest build. Any Intel Haswell (2013+) or AMD Zen (2017+) qualifies. |
-| **`sse4`** | x86-64 with **SSE2/SSE4** (essentially any x86-64) | For pre-AVX2 CPUs (e.g. Ivy/Sandy Bridge). 4-way. Build with `GOAMD64=v2`. |
+| **`avx2 avx512ifma`** | x86-64 with **AVX2** *and* **AVX-512 F/VL/IFMA**; `GOAMD64=v3` set; **SHA-NI** used if present | The fastest build (AVX2 RIPEMD160 + IFMA field multiply). Intel Ice/Tiger Lake+, AMD Zen 4+. |
+| **`avx2`** | x86-64 with **AVX2** + the `GOAMD64=v3` set (BMI2/FMA/F16C) | AVX2 RIPEMD160 only; the **field math falls back to pure Go** (slower). For AVX2 CPUs without AVX-512 IFMA. |
+| **`sse4`** | x86-64 with **SSE2/SSE4** (essentially any x86-64) | 4-way RIPEMD160; field math pure Go. For pre-AVX2 CPUs. Build with `GOAMD64=v2`. |
 | **none (pure-Go)** | nothing special; no C compiler | Universal fallback, slow. |
 
 **Developed & benchmarked on:** Intel Core i7-1185G7 — 11th Gen "Tiger Lake",
-4C/8T, AVX2 + AVX-512 (F/DQ/BW/VL/IFMA) + SHA-NI. AVX-512 is present but not used
-yet (an AVX-512 IFMA field-arithmetic path is the planned next step).
+4C/8T, AVX2 + AVX-512 (F/DQ/BW/VL/IFMA) + SHA-NI — which supports the full
+`avx2 avx512ifma` build.
 
 To check a CPU on Linux:
 
 ```
 grep -m1 'model name' /proc/cpuinfo
-grep -m1 -o 'avx2' /proc/cpuinfo   # prints "avx2" if the avx2 backend will run
+grep -m1 -o 'avx512ifma' /proc/cpuinfo   # prints "avx512ifma" if the fast field kernel will run
+grep -m1 -o 'avx2' /proc/cpuinfo         # prints "avx2" if the AVX2 hash backend will run
 ```
 
 ## Description
 
 The program works as follows:
 
-1. It prompts the user to enter a wallet number (1–160).
+1. It takes a wallet number (1–160) — from the `-wallet` flag, or by prompting
+   when the flag is omitted.
 2. It resolves that wallet's target Hash160 from `data/hash160s.json` and its key
    range from `data/ranges.json`.
 3. It searches private keys within that range, computing
@@ -53,8 +60,8 @@ Progress (keys checked, keys/sec, last key) is logged every 10 seconds.
 ## Prerequisites
 
 - Go 1.21 or higher
-- For the SIMD backends (`avx2`/`sse4`): a C compiler (`gcc`/`clang`) and
-  `CGO_ENABLED=1`, plus a CPU that supports the backend's ISA
+- For the SIMD backends (`avx2`/`sse4`/`avx512ifma`): a C compiler (`gcc`/`clang`)
+  and `CGO_ENABLED=1`, plus a CPU that supports the backend's ISA
   (see [Target CPU / hardware](#target-cpu--hardware)). The pure-Go fallback needs
   neither.
 
@@ -64,29 +71,37 @@ The program reads its data files relative to the working directory, so run it fr
 the project root (where the `data/` directory lives):
 
 ```
-./btcpuzzle-avx2
+./btcpuzzle-ifma -wallet 65    # non-interactive: search wallet 65
+./btcpuzzle-ifma               # interactive: prompts for the wallet number
 ```
 
-Then enter a wallet number between 1 and 160 when prompted. The search uses one
-worker per CPU core and runs until a match is found.
+`-wallet N` selects the puzzle (1–160) without prompting (handy for scripts and
+benchmarking); omit it to be prompted. The search uses one worker per CPU core and
+runs until a match is found (Ctrl-C to stop). On a match the private key is printed
+and written to `found_key_<hash160prefix>.txt` — **this file contains a private
+key** and is git-ignored. Low-numbered wallets solve instantly; high-numbered ones
+have astronomically large ranges and run indefinitely.
 
 ## Compilation
 
-The RIPEMD160 stage has **swappable SIMD backends selected by a build tag**, so one
-codebase produces an optimal binary per CPU. Build on the target machine with the
-matching tag:
+Both SIMD stages are **selected by build tags**, so one codebase produces an
+optimal binary per CPU. Build on the target machine with the matching tags:
 
-| Target CPU | Build command | Backend |
+| Target CPU | Build command | Backends |
 |---|---|---|
-| **x86-64 with AVX2** (this dev machine: Tiger Lake) | `GOAMD64=v3 CGO_ENABLED=1 go build -tags avx2 -o btcpuzzle-avx2 .` | 8-way AVX2 (cgo) |
-| **older x86-64, no AVX2** (e.g. Ivy/Sandy Bridge) | `GOAMD64=v2 CGO_ENABLED=1 go build -tags sse4 -o btcpuzzle-sse4 .` | 4-way SSE (cgo) |
+| **AVX2 + AVX-512 IFMA** (this dev machine: Tiger Lake) | `GOAMD64=v3 CGO_ENABLED=1 go build -tags "avx2 avx512ifma" -o btcpuzzle-ifma .` | AVX2 RIPEMD160 + IFMA field (cgo) |
+| **AVX2, no AVX-512 IFMA** | `GOAMD64=v3 CGO_ENABLED=1 go build -tags avx2 -o btcpuzzle-avx2 .` | AVX2 RIPEMD160; **field math pure Go** |
+| **older x86-64, no AVX2** (e.g. Ivy/Sandy Bridge) | `GOAMD64=v2 CGO_ENABLED=1 go build -tags sse4 -o btcpuzzle-sse4 .` | 4-way SSE RIPEMD160; field pure Go |
 | **any platform / no C compiler** | `CGO_ENABLED=0 go build -o btcpuzzle-purego .` | pure-Go fallback |
 
-The `avx2`/`sse4` builds need cgo (`gcc`/`clang`, `CGO_ENABLED=1`); the no-tag build
-is pure Go. `GOAMD64=v3` additionally enables AVX2/BMI2 for the Go field arithmetic
-(~1.2x). (`GOAMD64=v4`/AVX-512 was measured no faster — the Go compiler doesn't
-auto-vectorize the scalar field/hash code, so anything above `v3` only helps via a
-hand-written SIMD path like the RIPEMD160 backends.)
+> **Use both tags for the fast build.** `-tags avx2` alone compiles and runs, but
+> leaves the secp256k1 field arithmetic in pure Go — *slower* than the previous
+> scalar build. The `avx512ifma` tag is what enables the vectorized field multiply.
+
+The cgo builds need a C compiler (`gcc`/`clang`, `CGO_ENABLED=1`); the no-tag build
+is pure Go. `GOAMD64=v3` also enables AVX2/BMI2 for the Go glue. (`GOAMD64=v4`/auto
+AVX-512 is no faster — the Go compiler doesn't auto-vectorize the scalar code; the
+AVX-512 win comes from the hand-written IFMA kernel, not the compiler.)
 
 ## How the search works
 
@@ -97,37 +112,45 @@ in `search.go`:
   public keys differ by `+G`. Points are kept in **affine coordinates** and each
   `advance()` step adds `G` to every lane with the affine addition formula. This
   needs only ~4 field multiplications + 1 square per key (versus ~13 + 4 for
-  Jacobian addition plus a separate Jacobian→affine conversion), and field
-  arithmetic is the dominant cost of the loop.
+  Jacobian addition plus a separate Jacobian→affine conversion), which is why
+  vectorizing that field arithmetic (below) pays off.
+- **8-way AVX-512 IFMA field arithmetic.** The EC point arithmetic runs in the
+  `field52simd` kernel: field elements in radix 2^52 (5 limbs), 8 independent
+  lanes packed into AVX-512 registers, multiplied with `vpmadd52`. The whole
+  `advance()` step is fused into ~5 cgo calls (`SlopeSetup` → `MontForward` →
+  `InverseFe8` → `MontBackward` → `PointAdd`) over the whole lane set, so cgo call
+  overhead is negligible. Degenerate cases (a lane at ±G: doubling or the point at
+  infinity) are detected cheaply (a zero lane in the shared product) and fixed up
+  on a scalar path.
 - **Batched (Montgomery) inversion.** The one expensive field inverse per
-  `advance()` is shared across the whole batch of `lanesPerWorker` (1024) lanes:
-  all the lanes' denominators are inverted with a single `FieldVal.Inverse()` plus
-  multiplications. Because the points are already affine, `forEachHash()` needs no
-  inversion at all and hashes the stored coordinates directly, allocating nothing
-  per key.
+  `advance()` is shared across the whole batch via Montgomery's trick — run as 8
+  parallel chains (one per SIMD lane) folded through a single vectorized inverse.
+  Because the points stay affine, `forEachHash()` needs no inversion; it
+  canonicalizes the coordinates 8 lanes at a time (also in the kernel) and hashes
+  them, allocating nothing per key.
 - **Multi-message SIMD RIPEMD160.** `forEachHash()` gathers lanes into groups of
   `ripemd160simd.Lanes`, runs each lane's SHA256 (hardware SHA-NI), then computes
-  the group's RIPEMD160 in one multi-message backend call (`ripemd160simd.HashBatch`).
-  The backend is chosen by build tag (8-way AVX2, 4-way SSE4, or pure-Go); on AVX2
-  this took hashing from the largest single cost down to a few percent of the loop
-  (~3x on the whole search).
+  the group's RIPEMD160 in one multi-message backend call (`ripemd160simd.HashBatch`,
+  8-way AVX2 / 4-way SSE4 / pure-Go).
 - **Random independent lane starts.** Every lane gets its own uniformly-random
   starting key drawn from the full `[minKey, maxKey]` range and marches forward
   from there, so each run samples genuinely random regions of the range.
 
-Together these are roughly a **6x** throughput improvement over the original
-scalar-multiply-per-key loop. The dominant remaining cost is the secp256k1 field
-arithmetic.
+Together these are roughly a **3×** throughput improvement from the IFMA field
+kernel on top of the earlier ~6× affine + SIMD-RIPEMD160 rewrite. With the field
+multiply now vectorized, the loop is **SHA-256-bound** (hardware SHA-NI plus the
+stdlib hashing framework); the field arithmetic is no longer the dominant cost.
 
-Correctness is verified by `search_test.go` (the affine + SIMD pipeline yields
-byte-identical Hash160s to the reference single-key path, including the point-
-doubling case) and `ripemd160simd/ripemd160simd_test.go` (each backend matches the
-pure-Go reference). Pass the same `-tags` you build with so the tests exercise that
-backend:
+Correctness is verified by `search_test.go` (`TestLaneSetMatchesReference` and
+`TestLaneSetMultiGroup` — the full IFMA pipeline yields byte-identical Hash160s to
+the reference single-key path across multiple groups, padding lanes, and the
+point-doubling case), the `field52simd` differential tests (every field op + the
+kernel checked byte-for-byte against `btcec`/`big.Int`), and
+`ripemd160simd/ripemd160simd_test.go`. Pass the same tags you build with:
 
 ```
-CGO_ENABLED=1 go test -tags avx2 ./...   # AVX2 backend
-go test ./...                            # pure-Go fallback
+GOAMD64=v3 CGO_ENABLED=1 go test -tags "avx2 avx512ifma" ./...   # full SIMD build
+CGO_ENABLED=0 go test ./...                                      # pure-Go fallback
 ```
 
 `bench_test.go` compares throughput against the naive full-scalar-mult reference.
