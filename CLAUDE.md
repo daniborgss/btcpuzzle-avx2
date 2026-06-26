@@ -4,16 +4,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Commands
 
-**Two independent SIMD stages select their backend by build tag:** the RIPEMD160
-hash (`ripemd160simd/`, tags `avx2`/`sse4`/none) and the secp256k1 field multiply
-(`field52simd/`, tag `avx512ifma`/none). The **accelerated build combines both
-tags** (`avx2` for the hash, `avx512ifma` for the field math). Pick the backends
-for the target CPU and build on that machine:
+**Three independent SIMD stages select their backend by build tag:** the
+RIPEMD160 hash (`ripemd160simd/`, tags `avx2`/`sse4`/none), the secp256k1 field
+multiply (`field52simd/`, tag `avx512ifma`/none), and the SHA-256 of the pubkey
+(`sha256simd/`, tag `shani`/none). The **accelerated build combines all three
+tags** (`avx2 avx512ifma shani`). Pick the backends for the target CPU and build
+on that machine:
 
 ```bash
 # ACCELERATED (Tiger Lake dev machine): AVX2 RIPEMD160 + AVX-512 IFMA field mul.
 # GOAMD64=v3 also enables AVX2/BMI2 for the Go glue. cgo required.
-GOAMD64=v3 CGO_ENABLED=1 go build -tags "avx2 avx512ifma" -o btcpuzzle-ifma .
+GOAMD64=v3 CGO_ENABLED=1 go build -tags "avx2 avx512ifma shani" -o btcpuzzle-ifma .
 
 # AVX2 only: AVX2 RIPEMD160 but the field math falls back to PURE GO (slow).
 # Use only on AVX2-without-AVX512-IFMA CPUs; it is NOT the fast path on Tiger Lake.
@@ -29,11 +30,11 @@ CGO_ENABLED=0 go build -o btcpuzzle-purego .
 ./btcpuzzle-ifma
 
 # Tests / bench / profile — pass the SAME tags to exercise those backends.
-GOAMD64=v3 CGO_ENABLED=1 go test -tags "avx2 avx512ifma" ./...
+GOAMD64=v3 CGO_ENABLED=1 go test -tags "avx2 avx512ifma shani" ./...
 CGO_ENABLED=0 go test ./...                      # tests the pure-Go fallbacks
-GOAMD64=v3 CGO_ENABLED=1 go test -tags "avx2 avx512ifma" -run TestName ./...
-GOAMD64=v3 CGO_ENABLED=1 go test -tags "avx2 avx512ifma" -run=xxx -bench=BatchedIncremental -benchtime=3s -count=3 .
-GOAMD64=v3 CGO_ENABLED=1 go test -tags "avx2 avx512ifma" -run=xxx -bench=BatchedIncremental -cpuprofile=/tmp/cpu.prof . && go tool pprof -top /tmp/cpu.prof
+GOAMD64=v3 CGO_ENABLED=1 go test -tags "avx2 avx512ifma shani" -run TestName ./...
+GOAMD64=v3 CGO_ENABLED=1 go test -tags "avx2 avx512ifma shani" -run=xxx -bench=BatchedIncremental -benchtime=3s -count=3 .
+GOAMD64=v3 CGO_ENABLED=1 go test -tags "avx2 avx512ifma shani" -run=xxx -bench=BatchedIncremental -cpuprofile=/tmp/cpu.prof . && go tool pprof -top /tmp/cpu.prof
 
 # Tidy dependencies
 go mod tidy
@@ -96,6 +97,14 @@ The tool searches private keys within a puzzle's defined range to find the key m
    against `btcec`/`big.Int` (`Camada 1`), and `search_test.go` validates the whole
    integrated pipeline against the scalar reference. `field52_ifma.c` carries a
    `//go:build avx512ifma` constraint so it is not an orphan `.c` under `-tags avx2`.
+9. `sha256simd/` — 8-way SHA-256 of the fixed 33-byte compressed pubkey, same
+   backend pattern: `sha256_shani.c`+`shani.go` (`-tags shani`, the SHA-NI
+   extension — one hash at a time, single padded block, 8 lanes per cgo call) or
+   `purego.go` (no tag, `crypto/sha256.Sum256`). API `const Lanes=8` +
+   `HashBatch(out *[Lanes][32]byte, in *[Lanes][33]byte)`, checked byte-for-byte
+   against `crypto/sha256`. `-msha` isn't on cgo's CFLAGS allowlist, so the
+   feature is enabled via `__attribute__((target("sha,sse4.1,ssse3")))` in the C,
+   not a `-m` flag; the `.c` has a `//go:build shani` constraint (orphan guard).
 
 ### Data files (`data/`)
 
@@ -118,9 +127,9 @@ The search avoids a full secp256k1 scalar multiplication per key (tens of × fas
 - **Random independent lane starts.** Every lane (`numWorkers × lanesPerWorker` of them) gets its own uniformly-random starting key drawn from the full `[minKey, maxKey]` range and marches forward from there, so each run samples genuinely random regions rather than starting near `minKey`. A per-lane `maxTick` bounds the walk to the range (relevant only for small ranges; large puzzle ranges are effectively unbounded and run until a match). Batch and worker counts shrink automatically for ranges smaller than the lane count.
 - **btcec is now only for setup, not the hot loop.** `btcec/v2` (re-exporting `secp256k1/v4`'s `JacobianPoint`/`FieldVal`/`ModNScalar`/`ScalarBaseMultNonConst`) seeds the points (`newLaneSet`) and computes the rare doubling slope. All per-key field arithmetic lives in `field52simd` (radix 2^52, limbs < 2^52 feeding `vpmadd52`; see its `doc.go`/`CLAUDE`-style contract).
 
-**Performance history & current bottleneck.** Compounding rewrites over the original Jacobian-per-key loop: (1) affine rewrite (~2×); (2) 8-way AVX2 RIPEMD160 took hashing to a few percent (~3×); (3) **AVX-512 IFMA 8-way field multiply** (`field52simd`, `vpmadd52`) integrated into `advance`; (4) **cgo-call fusion** — the bottleneck after (3) was not SIMD but cgo call *overhead* (`advance` issued ~1800 cgo calls per 1024-key step). Fusing each phase into one call over the whole laneSet (`SlopeSetup`/`MontForward`/`InverseFe8`/`MontBackward`/`PointAdd`, ~5 calls/step), dropping `big.Int` from the canonical pack, and finally vectorizing the canonicalization itself in C (`CanonBytes`, two calls/`forEachHash`) took it from **~518 (pre-integration scalar btcec) → ~314 → ~191 → ~175 ns/key, ~3.0× end to end** (`-tags "avx2 avx512ifma"`). **The loop is now SHA-256-bound:** profiling shows ~40% field math (the IFMA C kernel — opaque to pprof, shows up as `runtime.cgocall`), ~23% SHA-256 (`blockSHANI` plus the stdlib `Digest` `Reset`/`Write`/`Sum` framework overhead). The only remaining lever is the per-lane SHA path (calling the block function directly to skip the `hash.Hash` framework) — **not** the field multiply (Amdahl). Lesson: at this point cgo *granularity* matters more than per-op SIMD; vectorizing a cheap op as its own cgo call is a wash. Benchmarks on this laptop are noisy — take the **minimum** ns/op across runs, re-profile (`-bench=BatchedIncremental -cpuprofile`) with the **full tag set**, and remember pprof cannot see inside the C kernel (its time is lumped into `runtime.cgocall`). `GOAMD64=v3` helps the Go glue for free.
+**Performance history & current bottleneck.** Compounding rewrites over the original Jacobian-per-key loop: (1) affine rewrite (~2×); (2) 8-way AVX2 RIPEMD160 took hashing to a few percent (~3×); (3) **AVX-512 IFMA 8-way field multiply** (`field52simd`, `vpmadd52`) integrated into `advance`; (4) **cgo-call fusion** — the bottleneck after (3) was not SIMD but cgo call *overhead* (`advance` issued ~1800 cgo calls per 1024-key step). Fusing each phase into one call over the whole laneSet (`SlopeSetup`/`MontForward`/`InverseFe8`/`MontBackward`/`PointAdd`, ~5 calls/step), dropping `big.Int` from the canonical pack, and finally vectorizing the canonicalization itself in C (`CanonBytes`, two calls/`forEachHash`) took it from **~518 (pre-integration scalar btcec) → ~314 → ~191 → ~175 ns/key, ~3.0× end to end** (`-tags "avx2 avx512ifma shani"`). **The loop is now SHA-256-bound:** profiling shows ~40% field math (the IFMA C kernel — opaque to pprof, shows up as `runtime.cgocall`), ~23% SHA-256 (`blockSHANI` plus the stdlib `Digest` `Reset`/`Write`/`Sum` framework overhead). (5) **SHA-NI 8-way kernel** (`sha256simd`): the per-lane stdlib hashing framework (Reset/Write/Sum on `crypto/sha256.Digest`) was ~17% of the loop — `sha256.Sum256` shaved ~7% (no state clone) and a hand-written SHA-NI kernel (single padded block, 8 lanes/cgo call) took the rest, **~12% over the stdlib path in a controlled interleaved A/B** (~189 → ~167 ns/key). With both the field math and the SHA framework removed, what's left is the irreducible work: the IFMA field multiply, the SHA-NI and AVX2 hash compressions, and the canonical pack — there is no further single lever. **Don't** chase the field multiply (Amdahl: it's a minority slice). Lesson: at this point cgo *granularity* matters more than per-op SIMD; vectorizing a cheap op as its own cgo call is a wash. Benchmarks on this laptop are noisy — take the **minimum** ns/op across runs, re-profile (`-bench=BatchedIncremental -cpuprofile`) with the **full tag set**, and remember pprof cannot see inside the C kernel (its time is lumped into `runtime.cgocall`). `GOAMD64=v3` helps the Go glue for free.
 
-**Correctness is verified by `search_test.go`** (`TestLaneSetMatchesReference` + `TestLaneSetMultiGroup`), which assert the batched/incremental pipeline yields byte-identical hash160s to the reference `privateKeyToHash160` across multiple keys and advance steps — including the seed-key-1 doubling and, in the multi-group test, cross-group inversion and dead padding lanes. Run it after any change to the field/curve math: silent math bugs produce wrong hashes, not crashes (`CGO_ENABLED=0 go test .` for the pure-Go pipeline, `-tags "avx2 avx512ifma"` for the kernel). The `field52simd` differential harness validates each field op + the kernel byte-for-byte against `btcec`/`big.Int`. `bench_test.go` compares the pipeline against the naive full-scalar-mult reference.
+**Correctness is verified by `search_test.go`** (`TestLaneSetMatchesReference` + `TestLaneSetMultiGroup`), which assert the batched/incremental pipeline yields byte-identical hash160s to the reference `privateKeyToHash160` across multiple keys and advance steps — including the seed-key-1 doubling and, in the multi-group test, cross-group inversion and dead padding lanes. Run it after any change to the field/curve math: silent math bugs produce wrong hashes, not crashes (`CGO_ENABLED=0 go test .` for the pure-Go pipeline, `-tags "avx2 avx512ifma shani"` for the kernel). The `field52simd` differential harness validates each field op + the kernel byte-for-byte against `btcec`/`big.Int`. `bench_test.go` compares the pipeline against the naive full-scalar-mult reference.
 
 ### Other design notes
 
